@@ -2,7 +2,6 @@ library(shiny)
 library(leaflet)
 
 
-
 ui <- fluidPage(
   
   titlePanel("US County Health Indicators"),
@@ -79,3 +78,5 @@ ui <- fluidPage(
   )
   
 )
+
+#

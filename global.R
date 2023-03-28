@@ -15,6 +15,5 @@ library(DT)
 
 
 joineddf3_sf <- readRDS("C:/Users/jorge/OneDrive/Desktop/rda/RShiny/Data/DemoTrends/joineddf3_sf.rds")
-
 joineddf2 <- readRDS("C:/Users/jorge/OneDrive/Desktop/rda/RShiny/Data/DemoTrends/joineddf2.rds")
 
