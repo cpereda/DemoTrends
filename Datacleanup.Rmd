@@ -1,0 +1,743 @@
+---
+title: "RShiny"
+output: html_notebook
+---
+
+
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(maps)
+library(ggmap)
+library(stringr)
+library(UScensus2010)
+library(scales)
+library(tigris)
+library(sf)
+
+
+setwd("C:/Users/jorge/OneDrive/Desktop/rda/RShiny/Data/DemoTrends")
+
+data("countyfips")
+
+data <- read.csv("DEFINEDDATAVALUE.csv")
+description <-read.csv("DATAELEMENTDESCRIPTION.csv")
+
+
+demographics <- read.csv("DEMOGRAPHICS.csv")
+risk <- read.csv("RISKFACTORSANDACCESSTOCARE.csv")
+summary <-read.csv("SUMMARYMEASURESOFHEALTH.csv")
+vulnerable <- read.csv("VUNERABLEPOPSANDENVHEALTH.csv")
+
+#Not sure I want to include these in my project
+# healthypeople <- read.csv("DemoTrends/HEALTHYPEOPLE2010.csv")
+# measures <- read.csv("DemoTrends/MEASURESOFBIRTHANDDEATH.csv")
+# deathcauses <- read.csv("DemoTrends/LEADINGCAUSESOFDEATH.csv")
+# relative <-read.csv("DemoTrends/RELATIVEHEALTHIMPORTANCE.csv")
+
+```
+
+Adding all the interesting columns that may show correlation.
+
+```{r}
+joineddf <- demographics %>%
+  inner_join(risk, by = c("County_FIPS_Code", "State_FIPS_Code")) %>%
+  select("State_FIPS_Code", "County_FIPS_Code", "CHSI_County_Name.x", "CHSI_State_Name.x", "CHSI_State_Abbr.x",
+         "Population_Size", "Population_Density", "Poverty",
+         "White", "Black", "Native_American", "Asian", "Hispanic", 
+         "Obesity", "Diabetes", "Uninsured", "High_Blood_Pres", "Smoker") %>%
+  inner_join(summary, by= c("County_FIPS_Code", "State_FIPS_Code")) %>%
+  select("State_FIPS_Code", "County_FIPS_Code", "CHSI_County_Name.x", "CHSI_State_Name.x", "CHSI_State_Abbr.x",
+         "Population_Size", "Population_Density", "Poverty",
+         "White", "Black", "Native_American", "Asian", "Hispanic", 
+         "Obesity", "Diabetes", "Uninsured", "High_Blood_Pres", "Smoker",
+         "ALE", "US_ALE", "All_Death", "US_All_Death") %>%
+  inner_join(vulnerable, by= c("County_FIPS_Code", "State_FIPS_Code")) %>%
+  select("State_FIPS_Code", "County_FIPS_Code", "CHSI_County_Name.x", "CHSI_State_Name.x", "CHSI_State_Abbr.x",
+         "Population_Size", "Population_Density", "Poverty",
+         "White", "Black", "Native_American", "Asian", "Hispanic", 
+         "Obesity", "Diabetes", "Uninsured", "High_Blood_Pres", "Smoker",
+         "No_HS_Diploma", "Unemployed", "Major_Depression", "Recent_Drug_Use", "EH_Time_Span") 
+
+
+```
+
+Let's look at the negative counts or possible NAs. High BP and Smoker have a lot of NAs. What can we do?
+
+
+```{r}
+
+summary(joineddf)
+negative_counts <- sapply(joineddf, function(x) sum(x < 0))
+print(negative_counts)
+rawdf = joineddf    ###Let's make a duplicate so we can compare later
+
+
+```
+Rather than eliminating significant portion of our dataset, let's try to take the average of each state's missing variable. For example, what is the average diabetes in state of NY? Let's replace all the negatives with that number.
+
+```{r}
+
+#replace negatives with NA
+
+df_averages <- joineddf %>%
+  mutate(High_Blood_Pres = ifelse(High_Blood_Pres < 0, NA, High_Blood_Pres),
+         Smoker = ifelse(Smoker < 0, NA, Smoker),
+         Diabetes = ifelse(Diabetes < 0, NA, Diabetes),
+         Obesity = ifelse(Obesity < 0, NA, Obesity),
+         Poverty = ifelse(Poverty <0, NA, Poverty),
+         Unemployed = ifelse(Unemployed <0, NA, Unemployed),
+         Uninsured = ifelse(Uninsured <0, NA, Uninsured)) %>%
+  
+#remove NA. NOTE THAT AK HAS NO VALUES. Therefore NAN produced. Use weighted mean by utilizing population density.
+  
+    group_by(CHSI_State_Abbr.x) %>%
+    summarize(High_Blood_Pres_avg = weighted.mean(High_Blood_Pres, w = Population_Density, na.rm = TRUE),
+            Smoker_avg = weighted.mean(Smoker, w = Population_Density, na.rm = TRUE),
+            Diabetes_avg = weighted.mean(Diabetes, w = Population_Density, na.rm = TRUE),
+            Obesity_avg = weighted.mean(Obesity, w = Population_Density, na.rm = TRUE),
+            Poverty_avg = weighted.mean(Poverty, w = Population_Density, na.rm = TRUE),
+            Unemployed_avg = weighted.mean(Unemployed, w = Population_Density, na.rm = TRUE),
+            Uninsured_avg = weighted.mean(Uninsured, w = Population_Density, na.rm = TRUE))
+
+#add back to main dataframe
+
+joineddf <- joineddf %>%
+  left_join(df_averages, by = "CHSI_State_Abbr.x") %>%
+  mutate(High_Blood_Pres = ifelse(High_Blood_Pres < 0, High_Blood_Pres_avg, High_Blood_Pres),
+         Smoker = ifelse(Smoker < 0, Smoker_avg, Smoker),
+         Diabetes = ifelse(Diabetes < 0, Diabetes_avg, Diabetes),
+         Obesity = ifelse(Obesity < 0, Obesity_avg, Obesity),
+         Poverty = ifelse(Poverty < 0, Poverty_avg, Poverty),
+         Unemployed = ifelse(Unemployed < 0, Unemployed_avg, Unemployed),
+         Uninsured = ifelse(Uninsured <0, Uninsured_avg, Uninsured)) %>%
+  select(-c(High_Blood_Pres_avg, Smoker_avg, Diabetes_avg, Obesity_avg, Poverty_avg, Unemployed_avg, Uninsured_avg))
+
+
+
+```
+
+Let's create new columns from the percentages
+
+
+```{r}
+
+joineddf <- joineddf %>%
+  filter(complete.cases(Diabetes, Obesity, Uninsured, High_Blood_Pres)) %>%
+  mutate(Population_Size = as.numeric(Population_Size),
+         Diabetes_Count = round(Diabetes * Population_Size / 100),
+         Obesity_Count = round(Obesity * Population_Size / 100),
+         High_Blood_Pres_Count = round(High_Blood_Pres * Population_Size / 100),
+         Smoker_Count = round(Smoker*Population_Size /100))
+
+
+```
+
+Let's change count to percentages
+
+```{r}
+
+joineddf <- joineddf %>%
+  mutate(No_HS_Diploma_Percent = round(No_HS_Diploma / Population_Size * 100, 2),
+         Unemployed_Percent = round(Unemployed / Population_Size * 100, 2),
+         Major_Depression_Percent = round(Major_Depression / Population_Size * 100, 2),
+         Uninsured_Percent = round(Uninsured/Population_Size*100, 2),
+         Recent_Drug_Use_Percent = round(Recent_Drug_Use / Population_Size * 100, 2))
+
+
+```
+
+Creating more columns with averages and totals of items of interest. In a new df StateAvg
+
+```{r}
+
+StateAvg <- joineddf %>%
+  rename(region = CHSI_State_Name.x) %>%
+  group_by(region) %>%
+  summarize(Total_Population_Size = sum(Population_Size),
+            Avg_Poverty = mean(Poverty),
+            Avg_White = mean(White),
+            Avg_Black = mean(Black),
+            Avg_Native_American = mean(Native_American),
+            Avg_Asian = mean(Asian),
+            Avg_Hispanic = mean(Hispanic),
+            Avg_Obesity = mean(Obesity),
+            Avg_Diabetes = mean(Diabetes),
+            Avg_High_Blood_Pres = mean(High_Blood_Pres),
+            Avg_Smoker = mean(Smoker),
+            Avg_No_HS_Diploma_Percent = mean(No_HS_Diploma_Percent),
+            Avg_Unemployed_Percent = mean(Unemployed_Percent),
+            Avg_Major_Depression_Percent = mean(Major_Depression_Percent),
+            Avg_Recent_Drug_Use_Percent = mean(Recent_Drug_Use_Percent),
+            Total_No_HS_Diploma = sum(No_HS_Diploma),
+            Total_Unemployed = sum(Unemployed),
+            Total_Major_Depression = sum(Major_Depression),
+            Total_Recent_Drug_Use = sum(Recent_Drug_Use),
+            Total_Diabetes = sum(Diabetes_Count),
+            Total_Obesity = sum(Obesity_Count),
+            Total_Uninsured = sum(Uninsured_Percent),
+            Total_High_Blood_Pres = sum(High_Blood_Pres_Count))
+
+
+
+#Combine columns fips - county and state
+
+joineddf <- joineddf %>%
+  mutate(County_FIPS_Code = ifelse(County_FIPS_Code < 10, paste0("00", County_FIPS_Code),
+                            ifelse(County_FIPS_Code < 100, paste0("0", County_FIPS_Code), County_FIPS_Code)),
+                            fips = paste0(State_FIPS_Code, County_FIPS_Code))
+  
+```  
+
+Create a dataframe that has fips code and longitude and latitude values
+
+```{r}
+
+gcounty <- map_data("county")
+
+
+#remove the word "county" from countyname at each row and capitalize first letter of columns state and county
+countyfips$countyname <- gsub(" county$", "", countyfips$countyname)
+
+#clean up columns before joining
+countyfips <- countyfips %>%
+  mutate(statename = str_replace_all(statename, "_", " ")) %>%
+  rename(subregion = countyname, region = statename) %>%
+  mutate(subregion = str_remove(subregion, " parish$")) %>%
+  mutate(subregion = str_replace(subregion, "st\\.", "st"))
+  
+joineddf <- joineddf %>%
+  mutate(fips = str_pad(fips, width = 5, pad = "0"))
+
+
+gcounty2 <- countyfips %>%
+  left_join(gcounty, by = c("subregion","region"))
+
+
+joineddf2 <- joineddf %>%
+  left_join(gcounty2, by = "fips") %>%
+  select(-group, -order) %>%
+  mutate(region = str_to_title(region),
+         subregion = str_to_title(subregion))
+
+joineddf2 <- na.omit(joineddf2)
+
+joineddf2 <- joineddf2 %>%
+  select(CHSI_County_Name.x,
+         CHSI_State_Name.x,
+         CHSI_State_Abbr.x,
+         fips, long, lat, Population_Size,
+         White, Black, Native_American, Asian, Hispanic,
+         Obesity, Diabetes, High_Blood_Pres,
+         Uninsured_Percent, Smoker, No_HS_Diploma_Percent, Unemployed, Poverty) %>%
+  rename(Uneducated = No_HS_Diploma_Percent,
+         Hypertension = High_Blood_Pres,
+         County = CHSI_County_Name.x,
+         Uninsured = Uninsured_Percent,
+         State = CHSI_State_Name.x,
+         StateAbb = CHSI_State_Abbr.x,
+         Population = Population_Size)
+
+
+
+us_counties <- counties(cb = TRUE)
+
+us_counties <- us_counties %>%
+  select(GEOID, geometry) %>%
+  rename(fips = GEOID) 
+
+#includes mapping of each county by their vertices
+joineddf2 <- joineddf2 %>% 
+  left_join(us_counties, by = "fips") %>%
+  select(County, State, StateAbb, fips, long, lat, Population, White, Black, Native_American, Asian, Hispanic, Obesity, Diabetes, Hypertension, Uninsured, Smoker, Uneducated, Unemployed, Poverty, geometry) 
+
+
+
+# field_count <- count.fields("/Users/jorge/OneDrive/Desktop/rda/RShiny/Data/DemoTrends/joineddf2.csv", sep = ",")
+# table(field_count)
+
+# saveRDS(joineddf2, "joineddf2.rds")
+# saveRDS(joineddf2, file = "joineddf2.rds")
+# write.csv(joineddf, file = "joineddf.csv", row.names = FALSE)
+
+```
+
+
+
+
+```{r}
+
+joineddf2 <- readRDS("C:/Users/jorge/OneDrive/Desktop/rda/RShiny/Data/DemoTrends/joineddf2.rds")
+
+#Mapping Diabetes Prevalence by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Diabetes)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Diabetes Prevalence by County")
+
+```
+
+
+
+```{r}
+
+
+#Mapping Blood Pressure by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Hypertension)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("High Blood Pressure Prevalence by County")
+
+```
+
+
+
+
+```{r}
+
+#Mapping Obesity by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Obesity)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Obesity Prevalence by County")
+
+```
+
+```{r}
+
+#Mapping Smoking Prevalence by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Smoker)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Smoking Prevalence by County")
+
+```
+
+```{r}
+
+#Mapping No HS Diploma Prevalence by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Uneducated)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("No HS Diploma Prevalence by County")
+
+```
+
+```{r}
+
+#Mapping Poverty Prevalence by County
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill=Poverty)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Poverty Prevalence by County")
+
+```
+
+
+
+```{r}
+#Mapping Uninsured Prevalence by County. Compress the values with log so they are easier to visualize.
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= log10(Uninsured))) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Uninsured Prevalence by County")
+
+```
+
+```{r}
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= White)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("White Prevalence by County")
+```
+
+```{r}
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= Black)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Black Prevalence by County")
+
+```
+
+```{r}
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= Hispanic)) +
+  scale_fill_gradient(low="white", high="blue") +
+  ggtitle("Hispanic Prevalence by County")
+
+```
+
+```{r}
+
+
+
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= Asian)) +
+  scale_fill_gradient(low="white", high="blue", trans="log10") +
+  ggtitle("Asian Prevalence by County")
+
+
+```
+
+```{r}
+ggplot(joineddf2, aes(x=long, y=lat, group= fips)) +
+  geom_polygon(aes(fill= Native_American)) +
+  scale_fill_gradient(low="white", high="blue", trans="log10") +
+  ggtitle("Native_American Prevalence by County")
+
+
+```
+
+```{r}
+
+joineddf %>%
+  pivot_longer(cols = c("Black", "White", "Native_American", "Asian", "Hispanic"), 
+               names_to = "ethnicity", values_to = "percentage") %>%
+  mutate(count = percentage*Population_Size/100) %>%
+  group_by(ethnicity) %>%
+  summarise(total = sum(count)) %>%
+  ggplot(aes(x = "", y = total, fill = ethnicity)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  ylab("") +
+  xlab("") +
+  ggtitle("Ethnicity Proportions") +
+  theme(axis.text = element_blank(),
+        panel.background = element_blank())
+
+```
+
+
+
+```{r}
+#correlation between obesity and diabetes
+
+ggplot(joineddf, aes(x = Obesity, y = Diabetes)) +
+  geom_point() +
+  labs(title = "Correlation Between Obesity and Diabetes",
+       x = "Obesity prevalence",
+       y = "Diabetes prevalence") +
+  theme_minimal() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(x = max(joineddf$Obesity), y = min(joineddf$Diabetes),
+            label = paste0("p: ", round(cor(joineddf$Obesity, joineddf$Diabetes), 2))) +
+  scale_x_log10() +
+  scale_y_log10()
+
+
+
+```
+
+
+```{r}
+
+ggplot(joineddf, aes(x = Obesity, y = High_Blood_Pres)) +
+  geom_point() +
+  labs(title = "Correlation Between Obesity and Hypertension",
+       x = "Obesity prevalence",
+       y = "Hypertension prevalence") +
+  theme_minimal() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(x = max(joineddf$Obesity), y = min(joineddf$High_Blood_Pres),
+            label = paste0("p: ", round(cor(joineddf$Obesity, joineddf$High_Blood_Pres), 2))) +
+  scale_x_log10() +
+  scale_y_log10()
+
+```
+
+
+
+
+```{r}
+
+#Not sure why there is a strong correlation here. 
+
+ggplot(joineddf, aes(x = Obesity, y = Smoker)) +
+  geom_point() +
+  labs(title = "Correlation Between Obesity and Smoking",
+       x = "Obesity prevalence",
+       y = "Smoking prevalence") +
+  theme_minimal() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(x = max(joineddf$Obesity), y = min(joineddf$Smoker),
+            label = paste0("p: ", round(cor(joineddf$Obesity, joineddf$Smoker), 2))) +
+  scale_x_log10() +
+  scale_y_log10()
+
+
+
+```
+
+
+
+
+
+```{r}
+
+ggplot(joineddf, aes(x = Uninsured, y = Major_Depression_Percent)) +
+  geom_point() +
+  labs(title = "Correlation Between Uninsured and Major Depression",
+       x = "Uninsured prevalence",
+       y = "Depression prevalence") +
+  theme_minimal() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(x = max(joineddf$Uninsured), y = min(joineddf$Major_Depression_Percent),
+            label = paste0("p: ", round(cor(joineddf$Uninsured, joineddf$Major_Depression_Percent), 2))) +
+  scale_x_log10() +
+  scale_y_log10()
+
+```
+
+
+```{r}
+joineddf2 %>%
+  filter(!is.na(State)) %>%
+  group_by(State, Diabetes) %>%
+  summarise(total_diabetes = sum(Diabetes)) %>%
+ggplot(aes(x = State, y = Diabetes)) +
+  geom_boxplot() +
+  facet_wrap(~ State, nrow = 2, scale = "free_x") +
+  ggtitle("Diabetes by State") +
+  
+    stat_summary(fun.data = "mean_sdl", fun.args = list(mult = 1), 
+               geom = "crossbar", width = 0.5, col = "red", alpha = 0.5, 
+               aes(x = State, y = Diabetes)) +
+
+  # Add total diabetes for each region
+  geom_text(aes(x = State, y = max(Diabetes), 
+                               label = paste("Total Diabetes:\n", 
+                                             round(total_diabetes))), 
+            vjust = -0.5, size = 3, col = "blue") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        strip.text = element_blank())
+
+
+
+```
+
+```{r}
+
+joineddf2 %>%
+  filter(!is.na(State)) %>%
+  group_by(State, Obesity) %>%
+  summarise(total_obesity = sum(Obesity)) %>%
+ggplot(aes(x = State, y = Obesity)) +
+  geom_boxplot() +
+  facet_wrap(~ State, nrow = 2, scale = "free_x") +
+  ggtitle("Obesity by State") +
+  
+    stat_summary(fun.data = "mean_sdl", fun.args = list(mult = 1), 
+               geom = "crossbar", width = 0.5, col = "red", alpha = 0.5, 
+               aes(x = State, y = Obesity)) +
+
+  # Add total obesity for each region
+  geom_text(aes(x = State, y = max(Obesity), 
+                               label = paste("Total Obesity:\n", 
+                                             round(total_obesity))), 
+            vjust = -0.5, size = 3, col = "blue") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        strip.text = element_blank())
+
+```
+
+
+```{r}
+
+#Mapping by individual states
+
+joineddf2 %>%
+  filter(State == "New York") %>%
+  mutate(group = group_indices(., County)) %>%
+  ggplot(aes(x = long, y = lat, group = group, fill = Diabetes)) +
+  geom_polygon() +
+  scale_fill_gradient(low = "white", high = "blue", name = "Diabetes Log",
+                      trans="log") +
+  ggtitle("Diabetes Prevalence by County") +
+  theme_void()
+
+```
+
+```{r}
+
+joineddf2 %>%
+  filter(State == "New York") %>%
+  mutate(group = group_indices(., County)) %>%
+  ggplot(aes(x = long, y = lat, group = group, fill = Obesity)) +
+  geom_polygon() +
+  scale_fill_gradient(low = "white", high = "blue", name = "Obesity Log",
+                      trans="log") +
+  ggtitle("Obesity Prevalence by County") +
+  theme_void()
+
+```
+
+
+```{r}
+joineddf2 %>%
+  filter(State == "New York") %>%
+  mutate(group = group_indices(., County)) %>%
+  ggplot(aes(x = long, y = lat, group = group, fill = Hypertension)) +
+  geom_polygon() +
+  scale_fill_gradient(low = "white", high = "blue", name = "Hypertension Log",
+                      trans="log") +
+  ggtitle("Hypertension Prevalence by County") +
+  theme_void()
+
+```
+
+```{r}
+
+joineddf2 %>%
+  select(State, County, Obesity, Diabetes, Hypertension) %>%
+  filter(!is.na(State), !is.na(County), !is.na(Obesity),
+         !is.na(Diabetes), !is.na(Hypertension)) %>%
+  pivot_longer(cols = c(Obesity, Diabetes, Hypertension),
+               names_to = "variable",
+               values_to = "value") %>%
+  group_by(State) %>%
+  summarise(diabetes_total = sum(value[variable == "Diabetes"]),
+            obesity_total = sum(value[variable == "Obesity"]),
+            hypertension_total = sum(value[variable == "Hypertension"])) %>%
+  ggplot(aes(x = diabetes_total, y = obesity_total)) +
+  geom_density_2d() +
+  labs(x = "Total Diabetes", y = "Total Obesity") +
+  ggtitle("Distribution of Diabetes and Obesity in the USA")
+
+```
+
+
+```{r}
+
+joineddf2 %>%
+  select(State, County, Obesity, Diabetes, Hypertension) %>%
+  filter(!is.na(State), !is.na(County), !is.na(Obesity),
+         !is.na(Diabetes), !is.na(Hypertension)) %>%
+  pivot_longer(cols = c(Obesity, Diabetes, Hypertension),
+               names_to = "variable",
+               values_to = "value") %>%
+  group_by(State, County, value, variable) %>%
+  summarise(diabetes_total = sum(value[variable == "Diabetes"]),
+            obesity_total = sum(value[variable == "Obesity"]),
+            hypertension_total = sum(value[variable == "Hypertension"])) %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.5) +
+  labs(x = "Prevalence", y = "Density", fill = "") +
+  ggtitle("Distribution of Obesity, Diabetes and High Blood Pressure in the USA")
+
+```
+
+
+
+
+```{r}
+
+joineddf2 %>%
+  group_by(region) %>%
+  summarise(Population_Size = mean(Population_Size, na.rm = TRUE),
+            White = mean(White, na.rm = TRUE),
+            Black = mean(Black, na.rm = TRUE),
+            Native_American = mean(Native_American, na.rm = TRUE),
+            Asian = mean(Asian, na.rm = TRUE),
+            Hispanic = mean(Hispanic, na.rm = TRUE),
+            Diabetes = mean(Diabetes, na.rm = TRUE),
+            Hypertension = mean(High_Blood_Pres, na.rm = TRUE),
+            Obesity = mean(Obesity, na.rm = TRUE),
+            Uninsured = mean(Uninsured, na.rm = TRUE),
+            Unemployed= mean(Unemployed_Percent, na.rm = TRUE),
+            Major_Depression= mean(Major_Depression_Percent, na.rm = TRUE),
+            Recent_Drug_Use = mean(Recent_Drug_Use_Percent, na.rm = TRUE),
+            No_HS_Diploma = mean(No_HS_Diploma_Percent, na.rm = TRUE),
+            Smoker = mean(Smoker, na.rm = TRUE),
+            Poverty = mean(Poverty, na.rm = TRUE))
+
+```
+
+
+
+```{r}
+
+library(tigris)
+
+counties_data <- counties(state = "*")
+fipscounty <- data.frame(fips <- counties_data$GEOID,
+                         long <- counties_data$INTPTLON,
+                         lat <- counties_data$INTPTLAT)
+
+fipscounty <- fipscounty %>%
+  rename(fips = fips....counties_data.GEOID,
+         lon = long....counties_data.INTPTLON,
+         lat = lat....counties_data.INTPTLAT)
+
+# joineddf3 <- joineddf %>%
+#   mutate(fips = str_pad(fips, width = 5, pad = "0"))
+# 
+# joineddf3 <- joineddf3 %>%      
+#   left_join(fipscounty, by= "fips") %>%
+#   na.omit() %>%
+#   select(CHSI_County_Name.x, CHSI_State_Name.x, CHSI_State_Abbr.x, fips, lon, lat, Population_Size, White, Black, Native_American, Asian, Hispanic, Obesity, Diabetes, High_Blood_Pres, Uninsured, Smoker, No_HS_Diploma, Unemployed, Poverty) %>%
+#   rename(Uneducated = No_HS_Diploma,
+#          Hypertension = High_Blood_Pres,
+#          County = CHSI_County_Name.x,
+#          State = CHSI_State_Name.x,
+#          StateAbb = CHSI_State_Abbr.x,
+#          Population = Population_Size)
+
+
+
+joineddf3 <- joineddf %>%
+  left_join(fipscounty, by= "fips") %>%
+    rename(Uneducated = No_HS_Diploma_Percent,
+         Hypertension = High_Blood_Pres,
+         County = CHSI_County_Name.x,
+         State = CHSI_State_Name.x,
+         StateAbb = CHSI_State_Abbr.x,
+         long = lon,
+         Population = Population_Size)%>%
+  left_join(us_counties, by = "fips") %>%
+  select(County, State, StateAbb, fips, long, lat, Population, White, Black, Native_American, Asian, Hispanic, Obesity, Diabetes, Hypertension, Uninsured_Percent, Smoker, Uneducated, Unemployed, Poverty, geometry) %>%
+  rename(Uninsured = Uninsured_Percent) %>%
+  mutate(long = as.numeric(gsub("\\+", "", long)),
+         lat = as.numeric(gsub("\\+", "", lat)))
+
+library(sf)
+library(sp)
+
+# Convert sfc_MULTIPOLYGON object to sf object
+joineddf3 <- st_as_sf(joineddf3)
+
+# Check for empty geometries
+empty_geoms <- st_is_empty(joineddf3)
+
+# Subset data to remove empty geometries
+joineddf3_sf <- joineddf3[!empty_geoms, ]
+
+# Convert sf object to SpatialPolygonsDataFrame object
+joineddf3 <- as(joineddf3, "Spatial")
+
+
+
+
+joineddf3_sf <- st_transform(joineddf3_sf, 4326)
+
+joineddf3_sf <- joineddf3_sf %>%
+  rename(Longitude = long,
+         Latitude = lat)
+  
+saveRDS(joineddf3_sf, "joineddf3_sf.rds")
+# saveRDS(joineddf3, "joineddf3.rds")
+
+```
+
+
